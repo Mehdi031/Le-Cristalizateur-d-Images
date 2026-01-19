@@ -6,276 +6,318 @@ import os
 from PIL import Image, ImageDraw
 
 # =============================================================================
-# LE CRISTALIZATEUR D'IMAGES
+# PROJET R506 : LE CRISTALIZATEUR D'IMAGES
 # =============================================================================
 
 class Point:
+    """Structure simple pour stocker les coordonnées d'un sommet."""
     def __init__(self, x, y):
         self.x = x
         self.y = y
 
     def dist_sq(self, other):
+        """Calcule la distance au carré entre deux points (plus rapide que sqrt)."""
         return (self.x - other.x)**2 + (self.y - other.y)**2
 
 class Triangle:
+    """Gère un triangle du maillage."""
     def __init__(self, p1, p2, p3):
         self.points = [p1, p2, p3]
-        self.color = (128, 128, 128)
-        self.error = 0 
-        self.update_circumcircle()
+        self.color = (0, 0, 0) # Couleur moyenne extraite de l'image
+        self.error = 0         # Écart de couleur par rapport à la photo originale
+        self.calc_cercle_circonscrit()
 
-    def update_circumcircle(self):
+    def calc_cercle_circonscrit(self):
+        """Calculer le centre et le rayon du cercle circonscrit (Méthode géométrique)."""
         p1, p2, p3 = self.points
         x1, y1 = p1.x, p1.y
         x2, y2 = p2.x, p2.y
         x3, y3 = p3.x, p3.y
+
+        # On utilise les formules de géométrie analytique
         D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+        
+        # Sécurité pour éviter la division par zéro (points alignés)
         if abs(D) < 0.0001: D = 0.0001
-        self.center_x = ((x1**2 + y1**2) * (y2 - y3) + (x2**2 + y2**2) * (y3 - y1) + (x3**2 + y3**2) * (y1 - y2)) / D
-        self.center_y = ((x1**2 + y1**2) * (x3 - x2) + (x2**2 + y2**2) * (x1 - x3) + (x3**2 + y3**2) * (x2 - x1)) / D
-        self.radius_sq = (x1 - self.center_x)**2 + (y1 - self.center_y)**2
+        
+        self.cx = ((x1**2 + y1**2) * (y2 - y3) + (x2**2 + y2**2) * (y3 - y1) + (x3**2 + y3**2) * (y1 - y2)) / D
+        self.cy = ((x1**2 + y1**2) * (x3 - x2) + (x2**2 + y2**2) * (x1 - x3) + (x3**2 + y3**2) * (x2 - x1)) / D
+        self.radius_sq = (x1 - self.cx)**2 + (y1 - self.cy)**2
 
-    def contains_point_in_circumcircle(self, p):
-        return (p.x - self.center_x)**2 + (p.y - self.center_y)**2 <= self.radius_sq
+    def contient_point_dans_cercle(self, p):
+        """Vérifie si le point p est à l'intérieur du cercle circonscrit (Règle de Delaunay)."""
+        return (p.x - self.cx)**2 + (p.y - self.cy)**2 <= self.radius_sq
 
-class MeshGenerator:
-    def __init__(self, width, height, initial_img_path=None):
-        self.width = width
-        self.height = height
+class GenerateurMaillage:
+    """Cœur de l'application : gère les points, la triangulation et l'analyse bitmap."""
+    def __init__(self, width, height, chemin_image=None):
+        self.w = width
+        self.h = height
         self.points = []
         self.triangles = []
-        self.show_wireframe = False
-        self.show_hint = False
-        self.fidelity = 0
-        self.image_list = self.discover_images()
-        self.image_index = 0
+        self.img_idx = 0
+        self.filaire = False   # Afficher les traits ou non
+        self.voir_aide = False # Voir l'image d'origine
+        self.fidélité = 0.0
         
-        if initial_img_path:
-            # Trouver l'index de l'image choisie
-            for i, p in enumerate(self.image_list):
-                if p == initial_img_path:
-                    self.image_index = i
-                    break
+        # Scanner le dossier pour trouver des photos
+        self.liste_images = self.charger_liste_images()
         
-        self.load_image_by_index(self.image_index)
+        if chemin_image in self.liste_images:
+            self.img_idx = self.liste_images.index(chemin_image)
+            
+        self.charger_image(self.img_idx)
 
-    def discover_images(self):
-        exts = ('.jpg', '.jpeg', '.png', '.bmp')
-        return sorted([f for f in os.listdir('.') if f.lower().endswith(exts)])
+    def charger_liste_images(self):
+        """Récupère tous les fichiers images du dossier."""
+        extensions = ('.jpg', '.jpeg', '.png', '.bmp')
+        return sorted([f for f in os.listdir('.') if f.lower().endswith(extensions)])
 
-    def load_image_by_index(self, index):
-        if not self.image_list:
-            self.img = self.create_fallback_gradient()
-            self.current_image_path = "Généré"
+    def charger_image(self, index):
+        """Charge l'image choisie et prépare les données pixels."""
+        if not self.liste_images:
+            # Sécurité : générer un dégradé si le dossier est vide
+            img = Image.new("RGB", (self.w, self.h))
+            draw = ImageDraw.Draw(img)
+            for y in range(self.h):
+                color = (int(255 * (1-y/self.h)), 50, int(255 * y/self.h))
+                draw.line([(0, y), (self.w, y)], fill=color)
+            self.nom_actuel = "Démo (Dégradé)"
         else:
-            self.image_index = index % len(self.image_list)
-            self.current_image_path = self.image_list[self.image_index]
+            self.img_idx = index % len(self.liste_images)
+            self.nom_actuel = self.liste_images[self.img_idx]
             try:
-                self.img = Image.open(self.current_image_path).convert("RGB")
-                self.img = self.img.resize((self.width, self.height))
+                img = Image.open(self.nom_actuel).convert("RGB")
+                img = img.resize((self.w, self.h))
             except:
-                self.img = self.create_fallback_gradient()
-        
-        self.image_data = self.img.load()
-        self.pygame_img = pygame.image.fromstring(self.img.tobytes(), self.img.size, self.img.mode)
+                img = Image.new("RGB", (self.w, self.h))
+
+        self.pixels = img.load()
+        # On garde une version Pygame pour l'affichage du fond
+        mode = img.mode
+        size = img.size
+        data = img.tobytes()
+        self.surface_originale = pygame.image.fromstring(data, size, mode)
         self.reset()
 
-    def cycle_image(self):
-        self.load_image_by_index(self.image_index + 1)
-        self.analyze_edges(100)
-
-    def create_fallback_gradient(self):
-        img = Image.new("RGB", (self.width, self.height))
-        draw = ImageDraw.Draw(img)
-        for y in range(self.height):
-            color = (int(255 * (1 - y/self.height)), 50, int(255 * (y/self.height)))
-            draw.line([(0, y), (self.width, y)], fill=color)
-        return img
-
     def reset(self):
-        self.points = [Point(0,0), Point(self.width,0), Point(0,self.height), Point(self.width,self.height),
-                       Point(self.width//2,0), Point(self.width//2,self.height), Point(0,self.height//2), Point(self.width,self.height//2)]
-        self.triangulate()
+        """Réinitialise les points avec juste les 4 coins et 4 milieux de bords."""
+        self.points = [
+            Point(0,0), Point(self.w,0), Point(0,self.h), Point(self.w,self.h),
+            Point(self.w//2,0), Point(self.w//2,self.h), Point(0,self.h//2), Point(self.w,self.h//2)
+        ]
+        self.calculer_triangulation()
 
-    def analyze_edges(self, count=100):
-        new_points = []
-        for _ in range(count * 5):
-            if len(new_points) >= count: break
-            x, y = random.randint(5, self.width-6), random.randint(5, self.height-6)
-            r, g, b = self.image_data[x, y]
-            lum = 0.299*r + 0.587*g + 0.114*b
-            others = [self.image_data[x+2, y], self.image_data[x-2, y], self.image_data[x, y+2], self.image_data[x, y-2]]
-            grad = sum(abs(lum - (0.299*p[0] + 0.587*p[1] + 0.114*p[2])) for p in others) / 4
+    def analyse_bitmap(self, nb=100):
+        """[CHAPITRE 2] : Placement intelligent de points basé sur le contraste."""
+        points_trouvés = 0
+        tentatives = 0
+        while points_trouvés < nb and tentatives < nb * 10:
+            x = random.randint(5, self.w-6)
+            y = random.randint(5, self.h-6)
+            
+            # On compare la luminance du pixel avec ses voisins (Gradient simple)
+            pix = self.pixels[x, y]
+            lum = sum(pix)/3
+            voisins = [self.pixels[x+2, y], self.pixels[x-2, y], self.pixels[x, y+2], self.pixels[x, y-2]]
+            grad = sum(abs(lum - sum(v)/3) for v in voisins) / 4
+            
+            # Si le contraste est fort (> seuil), on ajoute un point
             if grad > 20 or random.random() < 0.01:
-                new_points.append(Point(x, y))
-        self.points.extend(new_points)
-        self.triangulate()
+                self.points.append(Point(x, y))
+                points_trouvés += 1
+            tentatives += 1
+        
+        self.calculer_triangulation()
 
-    def triangulate(self):
-        st = [Point(-self.width*2, -self.height), Point(self.width*2, -self.height), Point(self.width//2, self.height*2)]
+    def calculer_triangulation(self):
+        """[CHAPITRE 3] : Algorithme de Bowyer-Watson pour Delaunay."""
+        # Triangle conteneur géant
+        st = [Point(-self.w*2, -self.h), Point(self.w*2, -self.h), Point(self.w//2, self.h*2)]
         self.triangles = [Triangle(st[0], st[1], st[2])]
+
         for p in self.points:
-            bad = [t for t in self.triangles if t.contains_point_in_circumcircle(p)]
-            poly = []
-            for t in bad:
+            # Trouver les triangles dont le cercle contient p
+            mauvais = [t for t in self.triangles if t.contient_point_dans_cercle(p)]
+            
+            # Trouver les bords de la cavité formée par ces triangles
+            cavité = []
+            for t in mauvais:
                 for i in range(3):
                     edge = (t.points[i], t.points[(i+1)%3])
-                    is_shared = any(other != t and any((edge[0]==other.points[j] and edge[1]==other.points[(j+1)%3]) or (edge[1]==other.points[j] and edge[0]==other.points[(j+1)%3]) for j in range(3)) for other in bad)
-                    if not is_shared: poly.append(edge)
-            for t in bad: self.triangles.remove(t)
-            for e in poly: self.triangles.append(Triangle(e[0], e[1], p))
-        self.triangles = [t for t in self.triangles if not any(p in st for p in t.points)]
-        self.calculate_fidelity()
+                    # Si le côté n'est pas partagé avec un autre triangle "mauvais", c'est un bord
+                    partagé = False
+                    for t2 in mauvais:
+                        if t == t2: continue
+                        for j in range(3):
+                            e2 = (t2.points[j], t2.points[(j+1)%3])
+                            if (edge[0]==e2[0] and edge[1]==e2[1]) or (edge[0]==e2[1] and edge[1]==e2[0]):
+                                partagé = True; break
+                        if partagé: break
+                    if not partagé: cavité.append(edge)
+            
+            # Remplacer les anciens triangles par des nouveaux reliés à p
+            for t in mauvais: self.triangles.remove(t)
+            for edge in cavité: self.triangles.append(Triangle(edge[0], edge[1], p))
 
-    def calculate_fidelity(self):
-        total_error = 0
+        # Supprimer les triangles liés au super-triangle de départ
+        self.triangles = [t for t in self.triangles if not any(pt in st for pt in t.points)]
+        self.calculer_couleurs_et_score()
+
+    def calculer_couleurs_et_score(self):
+        """[CHAPITRE 1] : Choix de la couleur et mesure de l'erreur."""
+        err_totale = 0
         for t in self.triangles:
-            cx = int((t.points[0].x + t.points[1].x + t.points[2].x) / 3)
-            cy = int((t.points[0].y + t.points[1].y + t.points[2].y) / 3)
-            cx, cy = max(0, min(self.width-1, cx)), max(0, min(self.height-1, cy))
-            t.color = self.image_data[cx, cy]
-            err = 0
-            samples = [(cx, cy), (int(t.points[0].x), int(t.points[0].y)), (int(t.points[1].x), int(t.points[1].y)), (int(t.points[2].x), int(t.points[2].y))]
-            for sx, sy in samples:
-                sx, sy = max(0, min(self.width-1, sx)), max(0, min(self.height-1, sy))
-                pc = self.image_data[sx, sy]
-                err += (t.color[0]-pc[0])**2 + (t.color[1]-pc[1])**2 + (t.color[2]-pc[2])**2
-            t.error = math.sqrt(err / len(samples))
-            total_error += t.error
-        avg_err = total_error / (len(self.triangles) if self.triangles else 1)
-        self.fidelity = max(0, 100 - (avg_err / 1.5)) 
+            # On prend la couleur au centre de gravité
+            cx = int((t.points[0].x+t.points[1].x+t.points[2].x)/3)
+            cy = int((t.points[0].y+t.points[1].y+t.points[2].y)/3)
+            cx, cy = max(0, min(self.w-1, cx)), max(0, min(self.h-1, cy))
+            t.color = self.pixels[cx, cy]
+            
+            # Évaluation locale de l'erreur (pour le score et l'aide visuelle)
+            err_locale = 0
+            points_test = [(cx, cy), (int(t.points[0].x), int(t.points[0].y)), (int(t.points[1].x), int(t.points[1].y))]
+            for tx, ty in points_test:
+                tx, ty = max(0, min(self.w-1, tx)), max(0, min(self.h-1, ty))
+                orig = self.pixels[tx, ty]
+                err_locale += (t.color[0]-orig[0])**2 + (t.color[1]-orig[1])**2 + (t.color[2]-orig[2])**2
+            t.error = math.sqrt(err_locale / 3)
+            err_totale += t.error
+        
+        # Calcul de fidélité pour le challenge pédagogique
+        if self.triangles:
+            moy_err = err_totale / len(self.triangles)
+            self.fidélité = max(0, 100 - (moy_err / 1.5))
 
-    def relax_points(self):
+    def optimiser(self):
+        """Lisse le maillage (Relaxation de Lloyd)."""
         if not self.triangles: return
-        new_points = self.points[:8]
+        nouveaux = self.points[:8] # On fixe le contour
         for i in range(8, len(self.points)):
             p = self.points[i]
             adj = [t for t in self.triangles if p in t.points]
             if adj:
-                new_points.append(Point(sum((t.points[0].x + t.points[1].x + t.points[2].x)/3 for t in adj)/len(adj),
-                                        sum((t.points[0].y + t.points[1].y + t.points[2].y)/3 for t in adj)/len(adj)))
-            else: new_points.append(p)
-        self.points = new_points
-        self.triangulate()
+                nx = sum((t.points[0].x+t.points[1].x+t.points[2].x)/3 for t in adj)/len(adj)
+                ny = sum((t.points[0].y+t.points[1].y+t.points[2].y)/3 for t in adj)/len(adj)
+                nouveaux.append(Point(nx, ny))
+            else: nouveaux.append(p)
+        self.points = nouveaux
+        self.calculer_triangulation()
 
-    def export_svg(self, filename="challenge_output.svg"):
-        with open(filename, "w") as f:
-            f.write(f'<svg viewBox="0 0 {self.width} {self.height}" xmlns="http://www.w3.org/2000/svg">\n')
+    def exporter(self):
+        """Export SVG version XML."""
+        nom = f"rendu_{int(time.time())}.svg"
+        with open(nom, "w") as f:
+            f.write(f'<svg viewBox="0 0 {self.w} {self.h}" xmlns="http://www.w3.org/2000/svg">\n')
             for t in self.triangles:
-                pts = " ".join([f"{p.x},{p.y}" for p in t.points])
-                rgb = f"rgb({t.color[0]},{t.color[1]},{t.color[2]})"
-                f.write(f'  <polygon points="{pts}" fill="{rgb}" stroke="{rgb}" stroke-width="0.3"/>\n')
-            f.write("</svg>")
-        print(f"Sauvegardé : {filename} (Fidélité: {self.fidelity:.1f}%)")
+                pts = " ".join([f"{int(p.x)},{int(p.y)}" for p in t.points])
+                f.write(f'  <polygon points="{pts}" fill="rgb{t.color}" stroke="rgb{t.color}" stroke-width="0.3"/>\n')
+            f.write("</svg>\n")
+        print(f"Exportation SVG réussie : {nom}")
 
-def draw_text(screen, text, x, y, size=20, color=(255, 255, 255), center=False):
-    font = pygame.font.SysFont("Arial", size, bold=True)
-    img = font.render(text, True, color)
+def dessiner_texte(screen, txt, x, y, size=18, color=(255, 255, 255), center=False):
+    font = pygame.font.SysFont("Verdana", size, bold=True)
+    surf = font.render(txt, True, color)
     if center:
-        rect = img.get_rect(center=(x, y))
-        screen.blit(img, rect)
+        rect = surf.get_rect(center=(x, y))
+        screen.blit(surf, rect)
     else:
-        screen.blit(img, (x, y))
+        screen.blit(surf, (x, y))
 
-def menu_loop(screen):
-    clock = pygame.time.Clock()
-    exts = ('.jpg', '.jpeg', '.png', '.bmp')
-    images = sorted([f for f in os.listdir('.') if f.lower().endswith(exts)])
-    selected_img = None
-    
-    while selected_img is None:
-        screen.fill((20, 20, 30))
-        draw_text(screen, "💎 LE CRISTALIZATEUR D'IMAGES", 500, 100, 40, (0, 255, 200), center=True)
-        draw_text(screen, "Choisissez votre point de départ :", 500, 180, 20, (200, 200, 200), center=True)
+def menu_demarrage(screen):
+    """Menu étudiant pour choisir l'image."""
+    imgs = sorted([f for f in os.listdir('.') if f.lower().endswith(('.jpg', '.png', '.bmp'))])
+    choix = None
+    while choix is None:
+        screen.fill((25, 25, 30))
+        dessiner_texte(screen, "LE CRISTALIZATEUR D'IMAGES (Projet R506)", 500, 100, 30, (0, 255, 200), True)
+        dessiner_texte(screen, "Sélectionnez une photo pour commencer :", 500, 180, 16, (180, 180, 180), True)
         
-        for i, img_name in enumerate(images):
-            y_pos = 250 + i * 40
-            rect = pygame.Rect(300, y_pos - 15, 400, 30)
-            mouse_pos = pygame.mouse.get_pos()
-            hover = rect.collidepoint(mouse_pos)
-            color = (255, 255, 255) if hover else (150, 150, 150)
-            if hover: pygame.draw.rect(screen, (40, 40, 60), rect, border_radius=5)
-            draw_text(screen, f"{i+1}. {img_name}", 500, y_pos, 22, color, center=True)
+        for i, nom in enumerate(imgs):
+            rect = pygame.Rect(350, 240 + i*40, 300, 32)
+            hover = rect.collidepoint(pygame.mouse.get_pos())
+            if hover: pygame.draw.rect(screen, (50, 50, 70), rect, border_radius=5)
+            dessiner_texte(screen, f"> {nom}", 500, 255 + i*40, 18, (255,255,255) if hover else (140,140,140), True)
             
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); exit()
-                if event.type == pygame.MOUSEBUTTONDOWN and hover:
-                    selected_img = img_name
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT: pygame.quit(); exit()
+                if ev.type == pygame.MOUSEBUTTONDOWN and hover: choix = nom
         
-        if not images:
-            draw_text(screen, "(Aucune image trouvée - Le dégradé sera utilisé)", 500, 300, 18, (255, 100, 100), center=True)
-            draw_text(screen, "Appuyez sur ESPACE pour continuer", 500, 400, 20, center=True)
-            for event in pygame.event.get():
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-                    selected_img = "fallback"
+        if not imgs:
+            dessiner_texte(screen, "(Aucune photo trouvée, déposez des .jpg ici !)", 500, 300, 16, (255, 100, 100), True)
+            dessiner_texte(screen, "Appuyez sur ENTRÉE pour continuer quand même", 500, 350, 18, center=True)
+            for ev in pygame.event.get():
+                if ev.type == pygame.KEYDOWN and ev.key == pygame.K_RETURN: choix = "demo"
 
         pygame.display.flip()
-        clock.tick(30)
-    return selected_img
+    return choix
 
 def main():
     pygame.init()
     W, H = 1000, 750
     screen = pygame.display.set_mode((W, H))
-    pygame.display.set_caption("Le Cristalizateur d'Images 💎")
+    pygame.display.set_caption("Cristalizateur - BUT Info R506")
     
-    # ÉTAPE 1 : MENU DE SÉLECTION
-    choice = menu_loop(screen)
-    
-    # ÉTAPE 2 : CHARGEMENT DU MESH
-    mesh = MeshGenerator(W, H, initial_img_path=choice if choice != "fallback" else None)
-    mesh.analyze_edges(200)
+    choix = menu_demarrage(screen)
+    gen = GenerateurMaillage(W, H, choix if choix != "demo" else None)
+    gen.analyse_bitmap(150)
     
     clock = pygame.time.Clock()
-    auto_mode = False
-    running = True
+    auto = False
+    run = True
     
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: running = False
-            elif event.type == pygame.MOUSEBUTTONDOWN:
+    while run:
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT: run = False
+            elif ev.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = pygame.mouse.get_pos()
-                if event.button == 1: mesh.points.append(Point(mx, my)); mesh.triangulate()
-                elif event.button == 3 and len(mesh.points) > 8:
-                    idx = -1; d_min = 1000
-                    for i in range(8, len(mesh.points)):
-                        d = (mesh.points[i].x-mx)**2 + (mesh.points[i].y-my)**2
-                        if d < d_min: d_min = d; idx = i
-                    if idx != -1: mesh.points.pop(idx); mesh.triangulate()
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_s: mesh.export_svg()
-                elif event.key == pygame.K_w: mesh.show_wireframe = not mesh.show_wireframe
-                elif event.key == pygame.K_r: mesh.reset(); mesh.analyze_edges(200)
-                elif event.key == pygame.K_n: mesh.cycle_image() # N pour CHANGER D'IMAGE
-                elif event.key == pygame.K_l: mesh.relax_points()
-                elif event.key == pygame.K_SPACE: auto_mode = not auto_mode
-                elif event.key == pygame.K_h: mesh.show_hint = True
-            elif event.type == pygame.KEYUP:
-                if event.key == pygame.K_h: mesh.show_hint = False
+                if ev.button == 1: # Clic gauche : nouveau point manuel
+                    gen.points.append(Point(mx, my))
+                    gen.calculer_triangulation()
+                elif ev.button == 3 and len(gen.points) > 8: # Clic droit : on vire le point le plus proche
+                    im_min = -1; d_min = 2000
+                    for i in range(8, len(gen.points)):
+                        d = (gen.points[i].x-mx)**2 + (gen.points[i].y-my)**2
+                        if d < d_min: d_min = d; im_min = i
+                    if im_min != -1: gen.points.pop(im_min); gen.calculer_triangulation()
+            
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_s: gen.exporter()
+                elif ev.key == pygame.K_w: gen.filaire = not gen.filaire
+                elif ev.key == pygame.K_r: gen.reset(); gen.analyse_bitmap(150)
+                elif ev.key == pygame.K_n: gen.charger_image(gen.img_idx + 1); gen.analyse_bitmap(150)
+                elif ev.key == pygame.K_l: gen.optimiser()
+                elif ev.key == pygame.K_h: gen.voir_aide = True
+                elif ev.key == pygame.K_SPACE: auto = not auto
+            elif ev.type == pygame.KEYUP:
+                if ev.key == pygame.K_h: gen.voir_aide = False
 
-        if auto_mode and random.random() < 0.2: mesh.analyze_edges(5)
+        if auto and random.random() < 0.2: gen.analyse_bitmap(5)
 
-        screen.fill((15, 15, 20))
-        if mesh.show_hint:
-             screen.blit(mesh.pygame_img, (0,0))
+        # Dessin sur l'écran
+        screen.fill((20, 20, 25))
+        if gen.voir_aide:
+             screen.blit(gen.surface_originale, (0,0))
         else:
-            for t in mesh.triangles:
+            for t in gen.triangles:
                 pts = [(p.x, p.y) for p in t.points]
                 pygame.draw.polygon(screen, t.color, pts)
-                if mesh.show_wireframe:
-                    alpha = min(255, int(t.error * 5))
+                if gen.filaire:
+                    # Plus le triangle est imprécis, plus il "clignote" en blanc
+                    alpha = min(255, int(t.error * 6))
                     pygame.draw.polygon(screen, (255, 255, 255, alpha), pts, 1)
 
-        # HUD
-        overlay = pygame.Surface((W, 115), pygame.SRCALPHA)
-        pygame.draw.rect(overlay, (0, 0, 0, 210), (0, 0, W, 115))
-        screen.blit(overlay, (0, 0))
+        # Barre de texte (HUD)
+        hud = pygame.Surface((W, 110), pygame.SRCALPHA)
+        pygame.draw.rect(hud, (0, 0, 0, 200), (0, 0, W, 110))
+        screen.blit(hud, (0, 0))
         
-        eff_score = (mesh.fidelity**2) / (len(mesh.points) / 5)
+        # Petit calcul de score arbitraire pour le fun
+        score = int((gen.fidélité**2) / (len(gen.points)/7))
         
-        draw_text(screen, f"🏆 OBJECTIF : 98% FIDÉLITÉ (Actuel: {mesh.fidelity:.1f}%)", 20, 15, 24, (255, 215, 0))
-        draw_text(screen, f"Source: {mesh.current_image_path}  |  Score Efficacité: {int(eff_score)}", 20, 48, 18)
-        draw_text(screen, "[TOUCHE N: IMAGE SUIVANTE] | [L: Relaxer] | [H: Original] | [S: Sauvegarder]", 20, 78, 15, (0, 255, 180))
+        dessiner_texte(screen, f"🎯 Fidélité Graphique : {gen.fidélité:.1f}%", 20, 15, 24, (255, 220, 0))
+        dessiner_texte(screen, f"Source : {gen.nom_actuel}  |  Score Efficacité : {score}", 20, 48, 16, (200, 200, 200))
+        dessiner_texte(screen, "[N] Image Suivante | [L] Lisser | [H] Image d'origine | [S] Sauvegarder SVG", 20, 78, 14, (0, 255, 180))
 
         pygame.display.flip()
         clock.tick(60)
